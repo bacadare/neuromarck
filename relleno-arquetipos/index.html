@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEUROMARCK - Los 12 Arquetipos (relleno 30 s)</title>
+<style>
+  @font-face { font-family: 'Cinzel'; font-weight: 400; src: url('fonts/cinzel-latin-400-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Cinzel'; font-weight: 600; src: url('fonts/cinzel-latin-600-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Outfit'; font-weight: 200; src: url('fonts/outfit-latin-200-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Space Mono'; font-weight: 400; src: url('fonts/space-mono-latin-400-normal.woff2') format('woff2'); }
+  @font-face { font-family: 'Space Mono'; font-weight: 700; src: url('fonts/space-mono-latin-700-normal.woff2') format('woff2'); }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; max-width: 100vw; max-height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/*
+ * Relleno de 30 s: "Los 12 Arquetipos de Marca".
+ * Todo se dibuja en un <canvas> en función del tiempo t (segundos), así que
+ * el mismo código sirve para verlo en vivo y para exportarlo cuadro a cuadro.
+ *
+ *   index.html            -> vertical 1080x1920 (reels / stories)
+ *   index.html?w=1920&h=1080 -> horizontal
+ */
+const params = new URLSearchParams(location.search);
+const W = +params.get('w') || 1080;
+const H = +params.get('h') || 1920;
+const DURATION = 30, INTRO = 3, SEG = 2, N = 12, OUTRO = INTRO + N * SEG;
+
+const ARQ = [
+  { n: 'El Inocente',      k: 'Optimismo · Pureza',          c: '#7fe3ff',
+    d: 'M50 32 a18 18 0 1 0 0.01 0 M50 14 V22 M50 78 V86 M14 50 H22 M78 50 H86 M31.6 31.6 L24.5 24.5 M68.4 31.6 L75.5 24.5 M31.6 68.4 L24.5 75.5 M68.4 68.4 L75.5 75.5' },
+  { n: 'El Sabio',         k: 'Conocimiento · Verdad',       c: '#5aa8ff',
+    d: 'M10 50 Q50 14 90 50 Q50 86 10 50 Z M50 39 a11 11 0 1 0 0.01 0' },
+  { n: 'El Explorador',    k: 'Libertad · Descubrimiento',   c: '#3ddc97',
+    d: 'M50 14 a36 36 0 1 0 0.01 0 M50 24 L60 50 L50 76 L40 50 Z M40 50 H60' },
+  { n: 'El Rebelde',       k: 'Ruptura · Revolución',        c: '#ff4d4d',
+    d: 'M58 10 L26 56 H48 L40 90 L74 42 H52 Z' },
+  { n: 'El Mago',          k: 'Transformación · Visión',     c: '#b388ff',
+    d: 'M46 16 Q50 50 84 54 Q50 58 46 92 Q42 58 8 54 Q42 50 46 16 Z M80 10 Q81 19 90 20 Q81 21 80 30 Q79 21 70 20 Q79 19 80 10 Z' },
+  { n: 'El Héroe',         k: 'Valentía · Superación',       c: '#ff6600',
+    d: 'M50 10 L82 22 V50 Q82 76 50 90 Q18 76 18 50 V22 Z M50 28 V72 M34 46 H66' },
+  { n: 'El Amante',        k: 'Pasión · Conexión',           c: '#ff5c8a',
+    d: 'M50 84 C20 62 10 44 10 32 C10 20 20 12 30 12 C40 12 47 18 50 26 C53 18 60 12 70 12 C80 12 90 20 90 32 C90 44 80 62 50 84 Z' },
+  { n: 'El Bufón',         k: 'Alegría · Humor',             c: '#ffd23f',
+    d: 'M50 12 a38 38 0 1 0 0.01 0 M28 54 Q50 82 72 54 Z M30 40 Q36 31 42 40 M58 40 Q64 31 70 40' },
+  { n: 'La Persona Común', k: 'Pertenencia · Empatía',       c: '#9ad1d4',
+    d: 'M50 18 a12 12 0 1 0 0.01 0 M22 84 Q22 54 50 54 Q78 54 78 84 M20 33 a7 7 0 1 0 0.01 0 M80 33 a7 7 0 1 0 0.01 0 M4 80 Q4 60 21 58 M96 80 Q96 60 79 58' },
+  { n: 'El Cuidador',      k: 'Protección · Servicio',       c: '#4fd1c5',
+    d: 'M50 54 C36 44 30 36 30 29 C30 23 35 19 40 19 C45 19 48 22 50 26 C52 22 55 19 60 19 C65 19 70 23 70 29 C70 36 64 44 50 54 Z M14 58 Q22 86 50 86 Q78 86 86 58 M27 63 Q35 75 50 75 Q65 75 73 63' },
+  { n: 'El Gobernante',    k: 'Liderazgo · Control',         c: '#f5b942',
+    d: 'M16 72 L10 30 L32 50 L50 20 L68 50 L90 30 L84 72 Z M16 84 H84' },
+  { n: 'El Creador',       k: 'Imaginación · Innovación',    c: '#ff8a3d',
+    d: 'M50 10 L72 48 L58 86 H42 L28 48 Z M50 10 V52 M50 52 a6 6 0 1 0 0.01 0' },
+];
+
+const canvas = document.getElementById('c');
+canvas.width = W; canvas.height = H;
+const ctx = canvas.getContext('2d');
+
+// ---- Geometría según formato -------------------------------------------
+const S = Math.min(W, H), vertical = H >= W;
+const L = vertical
+  ? { cx: W / 2, cy: H * 0.385, R: S * 0.345, tx: W / 2, tyNum: H * 0.675, tyName: H * 0.745, tyKey: H * 0.795, maxText: W * 0.86 }
+  : { cx: W * 0.29, cy: H * 0.52, R: S * 0.33, tx: W * 0.70, tyNum: H * 0.39, tyName: H * 0.535, tyKey: H * 0.63, maxText: W * 0.50 };
+
+// ---- Utilidades ---------------------------------------------------------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const ramp = (t, a, b) => clamp((t - a) / (b - a));
+const easeOut = x => 1 - Math.pow(1 - x, 3);
+const easeInOut = x => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const TAU = Math.PI * 2;
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const mix = (a, b, p) => a.map((v, i) => Math.round(v + (b[i] - v) * p));
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const BASE = hex('#38c8ff');
+ARQ.forEach(a => { a.rgb = hex(a.c); a.path = new Path2D(a.d); });
+
+// Longitud de cada glifo (para el efecto de trazado)
+const svgNS = 'http://www.w3.org/2000/svg';
+const probe = document.createElementNS(svgNS, 'path');
+ARQ.forEach(a => { probe.setAttribute('d', a.d); a.len = probe.getTotalLength(); });
+
+// Pseudoaleatorio con semilla: mismas partículas en cada render
+let seed = 20261112;
+const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+const PARTICLES = Array.from({ length: 80 }, () => {
+  let kx = Math.round(rnd() * 4 - 2), ky = Math.round(rnd() * 4 - 2);
+  if (!kx && !ky) ky = -1;
+  return { x: rnd(), y: rnd(), kx, ky, r: 0.8 + rnd() * 2.2, ph: rnd() * TAU, tw: 1 + Math.floor(rnd() * 4) };
+});
+
+function text(str, x, y, font, size, spacing, color, align = 'center') {
+  ctx.font = font.replace('$', size);
+  ctx.letterSpacing = spacing + 'px';
+  ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.fillText(str, align === 'center' ? x + spacing / 2 : x, y);
+}
+function fitSize(str, font, size, spacing, max) {
+  ctx.font = font.replace('$', size); ctx.letterSpacing = spacing + 'px';
+  const w = ctx.measureText(str).width;
+  return w > max ? size * max / w : size;
+}
+
+// ---- Estado de la línea de tiempo --------------------------------------
+function state(t) {
+  if (t < INTRO) return { phase: 'intro', s: t, idx: -1, rot: 0, col: BASE };
+  if (t >= OUTRO) {
+    const s = t - OUTRO;
+    return { phase: 'outro', s, idx: N, rot: -(N - 1 + easeInOut(ramp(s, 0, 1.2))) * TAU / N, col: mix(ARQ[N - 1].rgb, BASE, ramp(s, 0, 0.8)) };
+  }
+  const idx = Math.floor((t - INTRO) / SEG), s = (t - INTRO) - idx * SEG;
+  const p = easeInOut(ramp(s, 0, 0.55));
+  return { phase: 'arq', s, idx, rot: -(idx - 1 + p) * TAU / N * (idx ? 1 : 0), col: mix(idx ? ARQ[idx - 1].rgb : BASE, ARQ[idx].rgb, p) };
+}
+
+// ---- Dibujo -------------------------------------------------------------
+function background(t, col) {
+  ctx.fillStyle = '#040a13'; ctx.fillRect(0, 0, W, H);
+  let g = ctx.createRadialGradient(L.cx, L.cy, 0, L.cx, L.cy, Math.max(W, H) * 0.75);
+  g.addColorStop(0, 'rgba(22,78,120,0.60)'); g.addColorStop(0.45, 'rgba(10,34,58,0.45)'); g.addColorStop(1, 'rgba(4,10,19,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  g = ctx.createRadialGradient(L.cx, L.cy, 0, L.cx, L.cy, L.R * 1.5);
+  g.addColorStop(0, rgba(col, 0.20)); g.addColorStop(1, rgba(col, 0));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // Red neuronal de partículas (ciclo perfecto de 30 s)
+  const u = t / DURATION, pts = PARTICLES.map(p => ({
+    x: (((p.x + p.kx * u) % 1) + 1) % 1 * W,
+    y: (((p.y + p.ky * u) % 1) + 1) % 1 * H,
+    a: 0.35 + 0.35 * Math.sin(TAU * p.tw * u + p.ph), r: p.r * S / 1080,
+  }));
+  const maxD = S * 0.17;
+  ctx.lineWidth = S / 1080;
+  for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+    const d = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+    if (d < maxD) {
+      ctx.strokeStyle = rgba(BASE, 0.16 * (1 - d / maxD));
+      ctx.beginPath(); ctx.moveTo(pts[i].x, pts[i].y); ctx.lineTo(pts[j].x, pts[j].y); ctx.stroke();
+    }
+  }
+  for (const p of pts) {
+    ctx.fillStyle = rgba([170, 225, 255], p.a);
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+  }
+}
+
+function wheel(t, st, vis) {
+  const { cx, cy, R } = L, px = S / 1080;
+  const nodeAng = i => -Math.PI / 2 + i * TAU / N + st.rot;
+  const nodeIn = i => st.phase === 'intro' ? easeOut(ramp(st.s, 0.35 + i * 0.13, 0.75 + i * 0.13)) : 1;
+  ctx.save(); ctx.globalAlpha = vis;
+
+  // Anillos
+  ctx.lineWidth = 1.5 * px; ctx.strokeStyle = rgba(BASE, 0.30);
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.stroke();
+  ctx.strokeStyle = rgba(BASE, 0.12);
+  ctx.beginPath(); ctx.arc(cx, cy, R * 0.74, 0, TAU); ctx.stroke();
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(TAU * t / DURATION);
+  ctx.setLineDash([2 * px, 14 * px]); ctx.lineWidth = 2 * px; ctx.strokeStyle = rgba(BASE, 0.45);
+  ctx.beginPath(); ctx.arc(0, 0, R * 1.27, 0, TAU); ctx.stroke(); ctx.restore();
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(st.rot);
+  for (let i = 0; i < 60; i++) {
+    const a = i * TAU / 60, long = i % 5 === 0;
+    ctx.strokeStyle = rgba(BASE, long ? 0.5 : 0.22); ctx.lineWidth = px;
+    ctx.beginPath(); ctx.moveTo(Math.cos(a) * R * 1.035, Math.sin(a) * R * 1.035);
+    ctx.lineTo(Math.cos(a) * R * (long ? 1.075 : 1.055), Math.sin(a) * R * (long ? 1.075 : 1.055)); ctx.stroke();
+  }
+  ctx.restore();
+
+  // Estrella {12/5} que une los arquetipos
+  const starA = st.phase === 'arq' ? 0.10 + 0.20 * (1 - ramp(st.s, 0, 0.5)) * (st.idx === 0 ? 1 : 0) : 0.30;
+  const starP = st.phase === 'intro' ? easeInOut(ramp(st.s, 1.0, 2.7)) : 1;
+  ctx.strokeStyle = rgba(st.col, starA); ctx.lineWidth = 1.2 * px;
+  ctx.beginPath();
+  const edges = starP * N;
+  for (let e = 0; e < Math.ceil(edges); e++) {
+    const a0 = nodeAng(e * 5 % N), a1 = nodeAng((e + 1) * 5 % N), f = Math.min(1, edges - e);
+    const x0 = cx + Math.cos(a0) * R, y0 = cy + Math.sin(a0) * R, x1 = cx + Math.cos(a1) * R, y1 = cy + Math.sin(a1) * R;
+    ctx.moveTo(x0, y0); ctx.lineTo(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f);
+  }
+  ctx.stroke();
+
+  // Nodos
+  for (let i = 0; i < N; i++) {
+    const a = nodeAng(i), x = cx + Math.cos(a) * R, y = cy + Math.sin(a) * R, k = nodeIn(i);
+    if (k <= 0) continue;
+    const active = st.phase === 'arq' && i === st.idx, lit = st.phase === 'outro' || (st.phase === 'arq' && i < st.idx);
+    const on = active ? easeOut(ramp(st.s, 0.25, 0.6)) : 0;
+    ctx.save(); ctx.globalAlpha = vis * k;
+    if (active || lit) { ctx.shadowColor = ARQ[i].c; ctx.shadowBlur = (lit ? 14 : 34 * on) * px; }
+    ctx.fillStyle = active ? rgba(mix([200, 235, 255], ARQ[i].rgb, on), 1) : lit ? rgba(ARQ[i].rgb, 0.9) : '#06111e';
+    ctx.strokeStyle = active || lit ? ARQ[i].c : rgba([190, 230, 255], 0.55); ctx.lineWidth = 1.6 * px;
+    ctx.beginPath(); ctx.arc(x, y, (7 + 9 * on + (lit ? 1.5 : 0)) * px * k, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.shadowBlur = 0;
+    if (active) {
+      const pulse = (st.s * 0.9) % 1;
+      ctx.strokeStyle = rgba(ARQ[i].rgb, 0.7 * (1 - pulse) * on); ctx.lineWidth = 1.5 * px;
+      ctx.beginPath(); ctx.arc(x, y, (18 + 30 * pulse) * px, 0, TAU); ctx.stroke();
+    }
+    text(String(i + 1).padStart(2, '0'), cx + Math.cos(a) * R * 1.16, cy + Math.sin(a) * R * 1.16,
+      `400 $px 'Space Mono'`, 19 * px, 1 * px, active ? rgba(ARQ[i].rgb, 1) : rgba([190, 230, 255], lit ? 0.75 : 0.42));
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function glyph(st) {
+  if (st.phase !== 'arq') return;
+  const a = ARQ[st.idx], draw = easeInOut(ramp(st.s, 0.2, 1.05)), out = 1 - ramp(st.s, 1.72, 1.98);
+  const sc = L.R * 1.02 / 100, breathe = 1 + 0.025 * Math.sin(st.s * Math.PI);
+  ctx.save();
+  ctx.translate(L.cx, L.cy); ctx.scale(sc * breathe, sc * breathe); ctx.translate(-50, -50);
+  ctx.globalAlpha = out; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.fillStyle = rgba(a.rgb, 0.10 * ramp(st.s, 0.85, 1.25)); ctx.fill(a.path, 'evenodd');
+  ctx.setLineDash([a.len, a.len]); ctx.lineDashOffset = a.len * (1 - draw);
+  ctx.shadowColor = a.c; ctx.shadowBlur = 28 * S / 1080;
+  ctx.strokeStyle = a.c; ctx.lineWidth = 2.6; ctx.stroke(a.path);
+  ctx.shadowBlur = 0; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 0.8; ctx.stroke(a.path);
+  ctx.restore();
+}
+
+function copy(st) {
+  const px = S / 1080;
+  let small, name, key, col, inP, outP;
+  if (st.phase === 'intro') {
+    small = 'LOS 12'; name = 'ARQUETIPOS'; key = 'DE MARCA'; col = BASE;
+    inP = ramp(st.s, 0.5, 1.2); outP = ramp(st.s, 2.7, 2.97);
+  } else if (st.phase === 'outro') {
+    small = '¿CUÁL ES'; name = 'TU ARQUETIPO?'; key = 'DESCUBRE EL DE TU MARCA'; col = hex('#ff6600');
+    inP = ramp(st.s, 0.2, 0.8); outP = ramp(st.s, 2.6, 2.95);
+  } else {
+    const a = ARQ[st.idx];
+    small = String(st.idx + 1).padStart(2, '0'); name = a.n.toUpperCase(); key = a.k.toUpperCase(); col = a.rgb;
+    inP = ramp(st.s, 0.22, 0.7); outP = ramp(st.s, 1.72, 1.98);
+  }
+  const line = (delay, fn) => {
+    const p = easeOut(clamp(inP * 1.6 - delay)), alpha = p * (1 - outP);
+    if (alpha <= 0) return;
+    ctx.save(); ctx.globalAlpha = alpha; ctx.translate(0, (1 - p) * 34 * px - outP * 18 * px); fn(); ctx.restore();
+  };
+  const numeric = st.phase === 'arq';
+  line(0, () => {
+    if (numeric) {
+      text(small, L.tx, L.tyNum, `200 $px 'Outfit'`, 150 * px, 4 * px, rgba(col, 1));
+      text('/ 12', L.tx + 150 * px, L.tyNum + 34 * px, `400 $px 'Space Mono'`, 26 * px, 3 * px, 'rgba(210,235,255,0.6)');
+    } else text(small, L.tx, L.tyNum + 40 * px, `400 $px 'Space Mono'`, 40 * px, 16 * px, rgba(col, 1));
+  });
+  line(0.25, () => {
+    const font = `600 $px 'Cinzel'`, sp = 6 * px, size = fitSize(name, font, 92 * px, sp, L.maxText);
+    ctx.shadowColor = rgba(col, 0.55); ctx.shadowBlur = 30 * px;
+    text(name, L.tx, L.tyName, font, size, sp, '#ffffff');
+  });
+  line(0.5, () => {
+    const font = `400 $px 'Space Mono'`, sp = 7 * px, size = fitSize(key, font, 31 * px, sp, L.maxText);
+    const w = (ctx.font = font.replace('$', size), ctx.letterSpacing = sp + 'px', ctx.measureText(key).width);
+    ctx.fillStyle = rgba(col, 0.9);
+    ctx.fillRect(L.tx - w / 2 - 34 * px, L.tyKey - 1 * px, 20 * px, 2 * px);
+    ctx.fillRect(L.tx + w / 2 + 14 * px, L.tyKey - 1 * px, 20 * px, 2 * px);
+    text(key, L.tx, L.tyKey, font, size, sp, 'rgba(225,240,255,0.92)');
+  });
+}
+
+function chrome(t, vis) {
+  const px = S / 1080;
+  ctx.save(); ctx.globalAlpha = vis;
+  text('ARQUETIPOS DE MARCA', W / 2, H * (vertical ? 0.075 : 0.085), `400 $px 'Space Mono'`, 22 * px, 10 * px, 'rgba(190,230,255,0.75)');
+  text('NEUROMARCK', vertical ? W / 2 : L.tx, H * (vertical ? 0.925 : 0.915), `600 $px 'Cinzel'`, 34 * px, 14 * px, 'rgba(255,255,255,0.92)');
+  // Barra de progreso de los 12
+  const bw = 26 * px, gap = 10 * px, total = N * bw + (N - 1) * gap, y = H * (vertical ? 0.875 : 0.86);
+  for (let i = 0; i < N; i++) {
+    const f = clamp((t - INTRO - i * SEG) / SEG), x = (vertical ? W / 2 : L.tx) - total / 2 + i * (bw + gap);
+    ctx.fillStyle = 'rgba(190,230,255,0.18)'; ctx.fillRect(x, y, bw, 3 * px);
+    if (f > 0) { ctx.fillStyle = ARQ[i].c; ctx.fillRect(x, y, bw * f, 3 * px); }
+  }
+  ctx.restore();
+}
+
+function renderFrame(t) {
+  t = ((t % DURATION) + DURATION) % DURATION;
+  const st = state(t);
+  const vis = Math.min(easeOut(ramp(t, 0.1, 0.9)), 1 - ramp(t, DURATION - 0.45, DURATION - 0.05));
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.shadowBlur = 0; ctx.setLineDash([]);
+  background(t, st.col);
+  wheel(t, st, vis);
+  glyph(st);
+  copy(st);
+  chrome(t, vis);
+  // Viñeta
+  const g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45, W / 2, H / 2, Math.hypot(W, H) * 0.62);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.62)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+window.renderFrame = renderFrame;
+
+document.fonts.load("600 10px 'Cinzel'").then(() => Promise.all([
+  document.fonts.load("400 10px 'Space Mono'"), document.fonts.load("200 10px 'Outfit'"), document.fonts.ready,
+])).then(() => {
+  window.ready = true;
+  if (params.has('capture')) return renderFrame(0);
+  const t0 = performance.now();
+  (function loop(now) { renderFrame((now - t0) / 1000); requestAnimationFrame(loop); })(t0);
+});
+</script>
+</body>
+</html>
