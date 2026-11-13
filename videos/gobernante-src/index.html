@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style>
+<script type="importmap">{"imports":{"https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/+esm":"./node_modules/opentype.js/dist/opentype.module.js","three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { TTFLoader } from 'three/addons/loaders/TTFLoader.js';
+import { Font } from 'three/addons/loaders/FontLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const q = new URLSearchParams(location.search);
+const W = +(q.get('w') || 1080), H = +(q.get('h') || 1920);
+const DUR = 26.4;
+
+// ---------- helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const lerp = (a, b, p) => a + (b - a) * p;
+const eOutExpo = p => p >= 1 ? 1 : 1 - Math.pow(2, -10 * p);
+const eOutCubic = p => 1 - Math.pow(1 - p, 3);
+const eInCubic = p => p * p * p;
+const eInOut = p => p < .5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+const eOutBack = p => { const c = 1.9; return 1 + (c + 1) * Math.pow(p - 1, 3) + c * Math.pow(p - 1, 2); };
+function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+
+// ---------- renderer ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H); renderer.setPixelRatio(1);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020309);
+const camera = new THREE.PerspectiveCamera(40, W / H, 0.1, 200);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.55;
+
+const key = new THREE.DirectionalLight(0xffe2b0, 1.5); key.position.set(3, 6, 8); scene.add(key);
+const rim = new THREE.PointLight(0x3355ff, 22, 40); rim.position.set(-5, 2, 4); scene.add(rim);
+const rim2 = new THREE.PointLight(0xffb040, 16, 40); rim2.position.set(5, -3, 5); scene.add(rim2);
+
+// ---------- materials ----------
+const M = {
+  gold: new THREE.MeshStandardMaterial({ color: 0xe8b842, metalness: 1, roughness: 0.24, emissive: 0x5a3a00, emissiveIntensity: 0.55 }),
+  goldSoft: new THREE.MeshStandardMaterial({ color: 0xcfb53b, metalness: 1, roughness: 0.38 }),
+  plat: new THREE.MeshStandardMaterial({ color: 0xc4c6cf, metalness: 0.85, roughness: 0.36 }),
+  white: new THREE.MeshStandardMaterial({ color: 0xf8f8ff, metalness: 0.2, roughness: 0.35 }),
+  navy: new THREE.MeshPhysicalMaterial({ color: 0x000080, metalness: 0.35, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.15, emissive: 0x000040, emissiveIntensity: 0.5 }),
+  burg: new THREE.MeshPhysicalMaterial({ color: 0x800020, metalness: 0.35, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.15, emissive: 0x300008, emissiveIntensity: 0.4 }),
+  goldBar: new THREE.MeshStandardMaterial({ color: 0xcfb53b, metalness: 1, roughness: 0.25 }),
+  platBar: new THREE.MeshStandardMaterial({ color: 0xd2d1cf, metalness: 0.7, roughness: 0.4 }),
+  darkTxt: new THREE.MeshStandardMaterial({ color: 0x05051c, metalness: 0.6, roughness: 0.4 }),
+  marble: new THREE.MeshStandardMaterial({ color: 0xb9b6ae, metalness: 0.1, roughness: 0.45 }),
+  gemR: new THREE.MeshPhysicalMaterial({ color: 0x800020, metalness: 0.2, roughness: 0.05, clearcoat: 1, emissive: 0xa00028, emissiveIntensity: 1.2 }),
+  gemB: new THREE.MeshPhysicalMaterial({ color: 0x000080, metalness: 0.2, roughness: 0.05, clearcoat: 1, emissive: 0x1020ff, emissiveIntensity: 1.4 }),
+};
+const glowMat = (color, op = 1) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+
+// ---------- fonts / text ----------
+const fonts = {};
+async function loadFont(name, url) {
+  const l = new TTFLoader();
+  const json = await new Promise((res, rej) => l.load(url, res, undefined, rej));
+  fonts[name] = new Font(json);
+}
+// per-letter extruded text, centered on x, baseline at y=0
+function mkText(str, fontName, size, depth, mat, tracking = 0, bevel = true, maxW = 4.0) {
+  const font = fonts[fontName]; { let w0 = 0; for (const ch of str) w0 += (font.data.glyphs[ch] || font.data.glyphs['?']).ha * size / font.data.resolution + tracking; w0 -= tracking; if (w0 > maxW) { const k = maxW / w0; size *= k; depth *= k; tracking *= k; } }
+  const sc = size / font.data.resolution;
+  const g = new THREE.Group(); let x = 0; const letters = [];
+  for (const ch of str) {
+    const gl = font.data.glyphs[ch] || font.data.glyphs['?'];
+    const adv = gl.ha * sc;
+    if (ch !== ' ') {
+      const shapes = font.generateShapes(ch, size);
+      const geo = new THREE.ExtrudeGeometry(shapes, { depth, curveSegments: 5, bevelEnabled: bevel, bevelThickness: size * 0.025, bevelSize: size * 0.018, bevelSegments: 2 });
+      geo.translate(-adv / 2, 0, -depth / 2);
+      const m = new THREE.Mesh(geo, mat);
+      m.userData = { x0: x + adv / 2, adv, i: letters.length };
+      letters.push(m); g.add(m);
+    }
+    x += adv + tracking;
+  }
+  const width = x - tracking;
+  for (const m of letters) { m.userData.x0 -= width / 2; m.position.x = m.userData.x0; }
+  g.userData = { letters, width, size };
+  return g;
+}
+// staggered letter entrance: drop from z with rotation
+function lettersIn(g, t, t0, { stagger = 0.035, dur = 0.38, fromZ = 6, rot = 1.2, fromY = 0 } = {}) {
+  for (const m of g.userData.letters) {
+    const p = seg(t, t0 + m.userData.i * stagger, t0 + m.userData.i * stagger + dur);
+    const e = eOutExpo(p);
+    m.visible = p > 0;
+    m.position.z = (1 - e) * fromZ;
+    m.position.y = (1 - e) * fromY;
+    m.rotation.x = (1 - e) * rot;
+    m.scale.setScalar(lerp(1.8, 1, e));
+  }
+}
+function setTracking(g, extra) {
+  const L = g.userData.letters, n = L.length;
+  L.forEach((m, k) => { m.position.x = m.userData.x0 + (k - (n - 1) / 2) * extra; });
+}
+
+// ---------- background ----------
+const bg = new THREE.Mesh(new THREE.PlaneGeometry(120, 120), new THREE.ShaderMaterial({
+  uniforms: { uT: { value: 0 }, uTint: { value: new THREE.Color(0x0a1250) } },
+  vertexShader: 'varying vec2 vUv; void main(){vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
+  fragmentShader: `varying vec2 vUv; uniform float uT; uniform vec3 uTint;
+    void main(){ vec2 p=(vUv-.5)*2.; float r=length(p*vec2(1.,.75));
+      float a=atan(p.y,p.x); float rays=pow(.5+.5*sin(a*14.+uT*.25),6.)*.22*smoothstep(.9,.0,r);
+      vec3 c=uTint*(smoothstep(.8,.0,r)*.55+rays*.6); gl_FragColor=vec4(c+vec3(.006,.007,.02),1.); }`,
+  depthWrite: false }));
+bg.position.z = -40; scene.add(bg);
+
+// gold dust
+const dustN = 500, dustGeo = new THREE.BufferGeometry(), dustPos = new Float32Array(dustN * 3), dustSeed = [];
+{ const r = rng(7); for (let i = 0; i < dustN; i++) dustSeed.push([r() * 14 - 7, r() * 22 - 11, r() * 22 - 16, r() * 6.28, 0.3 + r() * 0.9]); }
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+const dotTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d'); const g = x.createRadialGradient(32, 32, 0, 32, 32, 32); g.addColorStop(0, 'rgba(255,235,170,1)'); g.addColorStop(.3, 'rgba(255,200,90,.5)'); g.addColorStop(1, 'rgba(255,180,60,0)'); x.fillStyle = g; x.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({ map: dotTex, size: 0.11, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.9 }));
+scene.add(dust);
+function updDust(t) {
+  for (let i = 0; i < dustN; i++) { const s = dustSeed[i];
+    dustPos[i * 3] = s[0] + Math.sin(t * 0.4 * s[4] + s[3]) * 0.4;
+    dustPos[i * 3 + 1] = ((s[1] + t * 0.55 * s[4] + 11) % 22) - 11;
+    dustPos[i * 3 + 2] = s[2]; }
+  dustGeo.attributes.position.needsUpdate = true;
+}
+// ornamental rings behind
+const rings = new THREE.Group();
+for (let i = 0; i < 3; i++) { const r = new THREE.Mesh(new THREE.TorusGeometry(3.4 + i * 1.5, 0.012, 6, 160), glowMat(0xcfb53b, 0.35 - i * 0.08)); rings.add(r); }
+rings.position.z = -8; scene.add(rings);
+
+// ---------- 3D symbols ----------
+function mkCrown() {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(1, 0.92, 0.5, 48, 1, true), new THREE.MeshStandardMaterial({ color: 0xe2b33e, metalness: 1, roughness: 0.2, side: THREE.DoubleSide })));
+  for (const y of [-0.25, 0.25]) { const tr = new THREE.Mesh(new THREE.TorusGeometry(y < 0 ? 0.93 : 1.0, 0.06, 10, 64), M.gold); tr.rotation.x = Math.PI / 2; tr.position.y = y; g.add(tr); }
+  const n = 8;
+  for (let i = 0; i < n; i++) {
+    const a = i / n * Math.PI * 2, big = i % 2 === 0, h = big ? 0.95 : 0.6;
+    const sh = new THREE.Shape(); sh.moveTo(-0.3, 0); sh.quadraticCurveTo(-0.08, h * 0.4, 0, h); sh.quadraticCurveTo(0.08, h * 0.4, 0.3, 0); sh.lineTo(-0.3, 0);
+    const sp = new THREE.Mesh(new THREE.ExtrudeGeometry(sh, { depth: 0.07, bevelEnabled: true, bevelThickness: 0.015, bevelSize: 0.015, bevelSegments: 2 }), M.gold);
+    sp.position.set(Math.sin(a) * 0.99, 0.25, Math.cos(a) * 0.99); sp.rotation.y = a; sp.rotation.x = -0.12; g.add(sp);
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(big ? 0.1 : 0.07, 16, 12), big ? M.gold : M.plat);
+    ball.position.set(Math.sin(a) * 1.1, 0.25 + h + 0.04, Math.cos(a) * 1.1); g.add(ball);
+    const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.1, 0), big ? M.gemR : M.gemB);
+    gem.position.set(Math.sin(a) * 0.98, 0, Math.cos(a) * 0.98); gem.rotation.y = a; gem.scale.set(1, 1.3, 0.6); g.add(gem);
+  }
+  return g;
+}
+function mkScepter() {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 3.2, 20), M.gold));
+  for (const y of [-1.5, -0.6, 0.9, 1.5]) { const r = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.04, 10, 28), M.plat); r.rotation.x = Math.PI / 2; r.position.y = y; g.add(r); }
+  const orb = new THREE.Mesh(new THREE.SphereGeometry(0.3, 32, 24), M.gemB); orb.position.y = 1.85; g.add(orb);
+  for (const rz of [0, Math.PI / 2]) { const band = new THREE.Mesh(new THREE.TorusGeometry(0.31, 0.03, 8, 40), M.gold); band.position.y = 1.85; band.rotation.y = rz; g.add(band); }
+  const eq = new THREE.Mesh(new THREE.TorusGeometry(0.31, 0.03, 8, 40), M.gold); eq.position.y = 1.85; eq.rotation.x = Math.PI / 2; g.add(eq);
+  const tip = new THREE.Mesh(new THREE.OctahedronGeometry(0.16, 0), M.gold); tip.position.y = 2.32; tip.scale.set(0.7, 1.5, 0.7); g.add(tip);
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12), M.gold); cap.position.y = -1.65; g.add(cap);
+  return g;
+}
+function mkLaurel() {
+  const g = new THREE.Group(), leafGeo = new THREE.SphereGeometry(1, 14, 10);
+  for (const side of [-1, 1]) for (let i = 0; i < 13; i++) {
+    const a = -Math.PI / 2 + side * (0.22 + i * 0.2), R = 1.25;
+    for (const inner of [-1, 1]) {
+      const leaf = new THREE.Mesh(leafGeo, i % 3 === 1 ? M.goldSoft : M.gold);
+      const s = 1 - i * 0.03; leaf.scale.set(0.34 * s, 0.11 * s, 0.05);
+      leaf.position.set(Math.cos(a) * (R + inner * 0.13), Math.sin(a) * (R + inner * 0.13), inner * 0.03);
+      leaf.rotation.z = a + side * (Math.PI / 2 + inner * 0.55) ; g.add(leaf);
+    }
+  }
+  const arc = new THREE.Mesh(new THREE.TorusGeometry(1.25, 0.025, 8, 100, Math.PI * 1.72), M.goldSoft); arc.rotation.z = -Math.PI / 2 - Math.PI * 0.86; g.add(arc);
+  const knot = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), M.plat); knot.position.y = -1.25; g.add(knot);
+  return g;
+}
+function mkColumn() {
+  const g = new THREE.Group();
+  // fluted shaft via lathe-like cylinder with radial displacement
+  const geo = new THREE.CylinderGeometry(0.42, 0.5, 2.6, 96, 8);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) { const x = p.getX(i), z = p.getZ(i), y = p.getY(i); if (Math.abs(y) > 1.29 && Math.hypot(x, z) < 0.01) continue; const a = Math.atan2(z, x); const k = 1 - 0.07 * Math.pow(Math.abs(Math.sin(a * 10)), 0.6); p.setX(i, x * k); p.setZ(i, z * k); }
+  geo.computeVertexNormals(); g.add(new THREE.Mesh(geo, M.marble));
+  const add = (geom, y, mat = M.marble) => { const m = new THREE.Mesh(geom, mat); m.position.y = y; g.add(m); return m; };
+  add(new THREE.BoxGeometry(1.5, 0.2, 1.5), -1.72); add(new THREE.CylinderGeometry(0.6, 0.66, 0.16, 48), -1.54);
+  add(new THREE.TorusGeometry(0.53, 0.07, 10, 48), -1.4, M.gold).rotation.x = Math.PI / 2;
+  add(new THREE.TorusGeometry(0.44, 0.06, 10, 48), 1.36, M.gold).rotation.x = Math.PI / 2;
+  add(new THREE.CylinderGeometry(0.66, 0.44, 0.24, 48), 1.52); add(new THREE.BoxGeometry(1.5, 0.18, 1.5), 1.73);
+  return g;
+}
+
+// ---------- post ----------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(W, H), 0.26, 0.4, 0.92); composer.addPass(bloom);
+const fx = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, uFlash: { value: 0 }, uFlashC: { value: new THREE.Color(0xffd27a) }, uAb: { value: 0 }, uFade: { value: 1 }, uT: { value: 0 }, uBlur: { value: new THREE.Vector2(0, 0) } },
+  vertexShader: 'varying vec2 vUv; void main(){vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
+  fragmentShader: `varying vec2 vUv; uniform sampler2D tDiffuse; uniform float uFlash,uAb,uFade,uT; uniform vec3 uFlashC; uniform vec2 uBlur;
+    float h(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233))+uT*7.)*43758.5453);}
+    void main(){ vec2 d=vUv-.5; vec3 c=vec3(0.);
+      for(int i=0;i<9;i++){ float k=(float(i)-4.)/4.; vec2 o=uBlur*k;
+        c+=vec3(texture2D(tDiffuse,vUv+o+d*uAb).r, texture2D(tDiffuse,vUv+o).g, texture2D(tDiffuse,vUv+o-d*uAb).b); }
+      c/=9.;
+      float v=smoothstep(1.05,.25,length(d*vec2(1.25,1.))); c*=mix(.45,1.,v);
+      c+=uFlashC*uFlash; c+=(h(vUv*800.)-.5)*.035; c*=uFade; gl_FragColor=vec4(c,1.); }` });
+composer.addPass(fx);
+composer.addPass(new OutputPass());
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.82;
+
+// ---------- timeline ----------
+const T = { s2: 4.0, s3: 7.0, s4: 11.95, s5: 17.55, s6: 23.45 };
+const impacts = [[0.45, 1], [1.95, 1.2], [5.87, 2.2], [8.2, .6], [9.65, .8], [10.35, .5], [13.23, 1], [14.63, 1], [15.4, 1], [16.05, 1], [18.76, 1], [19.79, 1], [20.84, 1], [21.84, 1], [23.7, 1], [24.9, 1.6]];
+const flashes = [[T.s2, .5], [5.87, 1.1], [T.s3, .6], [T.s4, .6], [T.s5, .6], [T.s6, .7], [24.9, .5], [1.95, .45], [14.63, .35]];
+const scenes = [];
+function addScene(a, b, inDir, outDir, build) { const g = new THREE.Group(); scene.add(g); const s = { g, a, b, inDir, outDir }; s.update = build(g); scenes.push(s); return s; }
+const header = (txt) => { const g = mkText(txt, 'cinzel7', 0.2, 0.03, M.plat, 0.09, false); g.position.y = 3.55; return g; };
+const hline = (w = 1.2, y = 3.36) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(w, 0.014), glowMat(0xcfb53b, 0.9)); m.position.y = y; return m; };
+
+function build() {
+  // ===== S1 hook =====
+  addScene(0, T.s2, null, 'z', g => {
+    const a1 = mkText('NO PIDE', 'cinzel9', 0.78, 0.2, M.plat), a2 = mkText('PERMISO.', 'cinzel9', 0.78, 0.2, M.plat);
+    a1.position.y = 0.3; a2.position.y = -0.75;
+    const b1 = mkText('IMPONE', 'cinzel9', 0.86, 0.24, M.gold), b2 = mkText('EL ORDEN.', 'cinzel9', 0.68, 0.24, M.gold);
+    b1.position.y = 0.3; b2.position.y = -0.75;
+    const A = new THREE.Group(); A.add(a1, a2); const B = new THREE.Group(); B.add(b1, b2); g.add(A, B);
+    // chaos cubes -> ordered frame
+    const cubes = [], r = rng(42), N = 56, cg = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+    for (let i = 0; i < N; i++) { const m = new THREE.Mesh(cg, i % 4 === 0 ? M.plat : M.gold);
+      const per = i / N, side = Math.floor(per * 4), u = (per * 4) % 1, hw = 2.15, hh = 2.05;
+      const tgt = side === 0 ? [lerp(-hw, hw, u), hh] : side === 1 ? [hw, lerp(hh, -hh, u)] : side === 2 ? [lerp(hw, -hw, u), -hh] : [-hw, lerp(-hh, hh, u)];
+      m.userData = { c: [r() * 6 - 3, r() * 9 - 4.5, r() * 6 - 4, r() * 6.28, r() * 6.28, 0.5 + r()], tgt }; cubes.push(m); g.add(m); }
+    return t => {
+      lettersIn(a1, t, 0.4, { fromZ: 9 }); lettersIn(a2, t, 0.62, { fromZ: 9 });
+      const sw = seg(t, 1.78, 1.95); A.visible = sw < 1; A.scale.setScalar(1 - eInCubic(sw) * 0.6); A.rotation.x = eInCubic(sw) * 1.4; A.position.z = -eInCubic(sw) * 3;
+      B.visible = t >= 1.9; lettersIn(b1, t, 1.9, { fromZ: 10, stagger: 0.03 }); lettersIn(b2, t, 2.1, { fromZ: 10, stagger: 0.03 });
+      B.rotation.y = Math.sin(t * 0.9) * 0.12; A.rotation.y = Math.sin(t * 1.3) * 0.1;
+      const o = eOutBack(seg(t, 1.92, 2.5));
+      for (const m of cubes) { const c = m.userData.c, tg = m.userData.tgt;
+        const cx = c[0] + Math.sin(t * c[5] * 1.7 + c[3]) * 0.6, cy = c[1] + Math.cos(t * c[5] * 1.4 + c[4]) * 0.6, cz = c[2];
+        m.position.set(lerp(cx, tg[0], o), lerp(cy, tg[1] - 0.15, o), lerp(cz, 0, o));
+        m.rotation.set((t * c[5] * 2 + c[3]) * (1 - o), (t * c[5] * 1.5 + c[4]) * (1 - o), 0); }
+    };
+  });
+  // ===== S2 title =====
+  addScene(T.s2, T.s3, 'z', 'x', g => {
+    const es = mkText('ES…', 'play7i', 0.5, 0.05, M.plat); es.position.y = -0.2;
+    const el = mkText('EL', 'cinzel7', 0.34, 0.06, M.plat, 0.25); el.position.y = -0.55;
+    const gob = mkText('GOBERNANTE', 'cinzel9', 0.6, 0.24, M.gold, 0.02, true, 4.45); gob.position.y = -1.3;
+    const crown = mkCrown(); crown.scale.setScalar(1.05);
+    const beam = new THREE.Mesh(new THREE.ConeGeometry(2.2, 14, 32, 1, true), glowMat(0xffd27a, 0.1)); beam.position.y = 7.5;
+    const shock = new THREE.Mesh(new THREE.TorusGeometry(1, 0.03, 8, 120), glowMat(0xffe0a0, 1));
+    const ln1 = hline(3.4, -1.62), sub = mkText('ARQUETIPO DE MARCA', 'cinzel7', 0.15, 0.02, M.plat, 0.12, false); sub.position.y = -1.98;
+    g.add(es, el, gob, crown, beam, shock, ln1, sub);
+    return t => {
+      const hit = 5.87;
+      lettersIn(es, t, 4.15, { fromZ: 4 }); const eo = seg(t, 5.2, 5.5); es.visible = eo < 1; es.scale.setScalar(1 + eo * 0.6); es.position.z = eo * 6;
+      const d = eOutCubic(seg(t, 4.2, hit)); const land = seg(t, hit, hit + 0.5);
+      crown.position.y = lerp(9, 1.35, d) + Math.sin(t * 2) * 0.05 * land; crown.rotation.y = t * 1.4 + (1 - d) * 8; crown.rotation.x = 0.22;
+      crown.scale.setScalar(1.05 * (1 + (1 - eOutExpo(land)) * 0.25 * (t > hit ? 1 : 0)));
+      beam.visible = false;
+      el.visible = t >= hit - 0.1; lettersIn(el, t, hit - 0.1, { fromZ: 3 });
+      lettersIn(gob, t, hit - 0.04, { fromZ: 12, stagger: 0.022, dur: 0.3, rot: 0.6 });
+      const sp = seg(t, hit, hit + 0.9); shock.visible = sp > 0 && sp < 1; shock.scale.setScalar(0.5 + eOutCubic(sp) * 7); shock.material.opacity = 1 - sp; shock.position.y = -1.0;
+      const lp = eOutExpo(seg(t, hit + 0.15, hit + 0.7)); ln1.scale.x = Math.max(lp, 0.001);
+      lettersIn(sub, t, hit + 0.25, { fromZ: 0, fromY: -0.3, rot: 0, stagger: 0.012 });
+    };
+  });
+  // ===== S3 typography =====
+  addScene(T.s3, T.s4, 'x', 'y', g => {
+    const hd = header('SU TIPOGRAFÍA'), hl = hline();
+    const R = mkText('R', 'cinzel9', 2.5, 0.5, M.gold); R.position.y = 0.55;
+    const guides = new THREE.Group();
+    for (const y of [0.55, 0.55 + 2.5 * 0.7]) { const l = new THREE.Mesh(new THREE.PlaneGeometry(4.6, 0.01), glowMat(0x8fa8ff, 0.7)); l.position.set(0, y, -0.3); guides.add(l); }
+    const tag = mkText('CINZEL  ·  PLAYFAIR DISPLAY', 'cinzel7', 0.13, 0.02, M.plat, 0.06, false); tag.position.y = 0.2;
+    const l1 = mkText('Serifas Clásicas', 'play7', 0.46, 0.08, M.plat); l1.position.y = -0.75;
+    const l2 = mkText('MAYÚSCULAS', 'cinzel9', 0.5, 0.14, M.gold); l2.position.y = -1.6;
+    const l3 = mkText('ESPACIO', 'cinzel7', 0.28, 0.05, M.plat); l3.position.y = -2.3;
+    const l4 = mkText('JERARQUÍA', 'cinzel7', 0.28, 0.05, M.plat); l4.position.y = -2.85;
+    g.add(hd, hl, R, guides, tag, l1, l2, l3, l4);
+    return t => {
+      const a = T.s3;
+      lettersIn(hd, t, a + 0.08, { fromZ: 0, fromY: 0.4, rot: 0, stagger: 0.015 }); hl.scale.x = Math.max(eOutExpo(seg(t, a + 0.2, a + 0.7)), 0.001);
+      const rp = eOutBack(seg(t, a + 0.1, a + 0.75)); R.scale.setScalar(Math.max(rp, 0.001)); R.rotation.y = (1 - eOutCubic(seg(t, a + 0.1, a + 1.3))) * -5 + Math.sin(t * 1.1) * 0.35;
+      guides.children.forEach((l, i) => { l.scale.x = Math.max(eOutExpo(seg(t, a + 0.5 + i * 0.12, a + 1.1 + i * 0.12)), 0.001); });
+      lettersIn(tag, t, a + 0.7, { fromZ: 0, fromY: -0.2, rot: 0, stagger: 0.008 });
+      lettersIn(l1, t, 8.15, { fromZ: 5, stagger: 0.025 });
+      lettersIn(l2, t, 9.6, { fromZ: 9, stagger: 0.025, dur: 0.3 });
+      lettersIn(l3, t, 10.3, { fromZ: 3, stagger: 0.02 }); setTracking(l3, eOutCubic(seg(t, 10.35, 11.6)) * 0.3);
+      lettersIn(l4, t, 10.75, { fromZ: 3, stagger: 0.02 }); l4.scale.setScalar(1 + eOutBack(seg(t, 10.85, 11.3)) * 0.35);
+    };
+  });
+  // ===== S4 colors =====
+  addScene(T.s4, T.s5, 'y', 'x', g => {
+    const hd = header('SUS COLORES'), hl = hline(); g.add(hd, hl);
+    const defs = [['AZUL IMPERIAL', '#000080', M.navy, M.plat, 13.2, 'autoridad'], ['ORO', '#CFB53B', M.goldBar, M.darkTxt, 14.6, 'poder'], ['PLATINO', '#E5E4E2', M.platBar, M.darkTxt, 15.38, 'prestigio'], ['BORGOÑA', '#800020', M.burg, M.plat, 16.03, 'legado']];
+    const bars = defs.map((d, i) => { const b = new THREE.Group();
+      const box = new THREE.Mesh(new THREE.BoxGeometry(4.1, 1.22, 0.55), d[2]); b.add(box);
+      const nm = mkText(d[0], 'cinzel9', 0.32, 0.05, d[3], 0.03, false); nm.position.set(-(4.1 - nm.userData.width) / 2 + 0.22, 0.0, 0.3); b.add(nm);
+      const hx = mkText(d[1], 'cinzel7', 0.15, 0.03, d[3], 0.04, false); hx.position.set(-(4.1 - hx.userData.width) / 2 + 0.24, -0.38, 0.3); b.add(hx);
+      const ps = mkText(d[5], 'play7i', 0.2, 0.03, d[3], 0, false); ps.position.set((4.1 - ps.userData.width) / 2 - 0.24, -0.36, 0.3); b.add(ps);
+      b.userData = { y: 2.2 - i * 1.42, t0: d[4], i }; g.add(b); return b; });
+    const orbs = [M.navy, M.goldBar, M.platBar, M.burg].map(m => { const o = new THREE.Mesh(new THREE.SphereGeometry(0.42, 40, 28), m); g.add(o); return o; });
+    return t => {
+      const a = T.s4;
+      { const gi = eOutBack(seg(t, a + 0.05, a + 0.5)), q = eInCubic(seg(t, 12.95, 13.15));
+        orbs.forEach((o, i) => { const an = t * 5 + i * Math.PI / 2, r = 1.35 * (1 - q); o.visible = q < 1; o.position.set(Math.cos(an) * r, 0.2 + Math.sin(an) * r, Math.sin(an * 2) * 0.5); o.scale.setScalar(Math.max(gi * (1 - q), 0.001)); }); }
+      lettersIn(hd, t, a + 0.08, { fromZ: 0, fromY: 0.4, rot: 0, stagger: 0.015 }); hl.scale.x = Math.max(eOutExpo(seg(t, a + 0.2, a + 0.7)), 0.001);
+      for (const b of bars) { const u = b.userData, p = seg(t, u.t0 - 0.12, u.t0 + 0.38), e = eOutExpo(p), dir = u.i % 2 ? 1 : -1;
+        b.visible = p > 0; b.position.set(dir * (1 - e) * 9, u.y, (1 - e) * 2);
+        b.rotation.x = (1 - eOutBack(p)) * Math.PI * 1.5; b.rotation.y = Math.sin(t * 1.2 + u.i) * 0.07 + dir * (1 - e) * 0.8;
+        const pop = seg(t, u.t0, u.t0 + 0.4); b.scale.setScalar(1 + Math.sin(pop * Math.PI) * 0.06); }
+      g.rotation.y = Math.sin((t - a) * 0.5) * 0.16;
+    };
+  });
+  // ===== S5 symbols =====
+  addScene(T.s5, T.s6, 'x', 'z', g => {
+    const hd = header('SUS SÍMBOLOS'), hl = hline(); g.add(hd, hl);
+    const items = [[mkCrown(), 'LA CORONA', 'poder', 18.7, 1.25, 0.25], [mkScepter(), 'EL CETRO', 'mando', 19.73, 0.92, 0], [mkLaurel(), 'EL LAUREL', 'victoria', 20.78, 1.3, 0], [mkColumn(), 'LA COLUMNA', 'estabilidad', 21.78, 0.95, 0.12]];
+    const ends = [19.73, 20.78, 21.78, 99];
+    const objs = items.map((it, i) => { const o = new THREE.Group(); o.add(it[0]); it[0].rotation.x = it[5]; o.position.y = 0.75;
+      const nm = mkText(it[1], 'cinzel9', 0.5, 0.12, M.gold, 0.02); nm.position.y = -2.15;
+      const sb = mkText(it[2], 'play7i', 0.34, 0.04, M.plat); sb.position.y = -2.8;
+      const num = mkText('0' + (i + 1) + ' / 04', 'cinzel7', 0.14, 0.02, M.plat, 0.08, false); num.position.y = -3.4;
+      g.add(o, nm, sb, num); return { o, m: it[0], nm, sb, num, t0: it[3], t1: ends[i], sc: it[4], i }; });
+    const halo = new THREE.Mesh(new THREE.TorusGeometry(2.0, 0.015, 6, 120), glowMat(0xcfb53b, 0.6)); halo.position.set(0, 0.75, -1); g.add(halo);
+    const halo2 = new THREE.Mesh(new THREE.TorusGeometry(2.25, 0.008, 6, 120), glowMat(0x8fa8ff, 0.5)); halo2.position.set(0, 0.75, -1); g.add(halo2);
+    const sparks = [0, 1, 2, 3].map(i => { const o = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), i % 2 ? M.plat : M.gold); g.add(o); return o; });
+    return t => {
+      const a = T.s5;
+      { const gi = eOutBack(seg(t, a + 0.05, a + 0.4)), q = eInCubic(seg(t, a + 0.3, 18.62));
+        sparks.forEach((o, i) => { const an = t * 7 + i * Math.PI / 2, r = 2.0 * (1 - q); o.visible = q < 1; o.position.set(Math.cos(an) * r, 0.75 + Math.sin(an) * r, 0); o.rotation.set(t * 4, t * 5, 0); o.scale.setScalar(Math.max(gi * (1 - q * 0.6), 0.001)); }); }
+      lettersIn(hd, t, a + 0.08, { fromZ: 0, fromY: 0.4, rot: 0, stagger: 0.015 }); hl.scale.x = Math.max(eOutExpo(seg(t, a + 0.2, a + 0.7)), 0.001);
+      halo.rotation.z = t * 0.6; halo2.rotation.z = -t * 0.4; halo.rotation.x = Math.sin(t) * 0.3; halo2.rotation.y = Math.cos(t * 0.8) * 0.3;
+      for (const s of objs) { const pin = seg(t, s.t0 - 0.1, s.t0 + 0.4), pout = seg(t, s.t1 - 0.22, s.t1 - 0.06);
+        const vis = pin > 0 && pout < 1; s.o.visible = s.nm.visible = s.sb.visible = s.num.visible = vis; if (!vis) continue;
+        const e = eOutBack(pin), x = eInCubic(pout), dir = s.i % 2 ? 1 : -1;
+        s.o.scale.setScalar(Math.max(s.sc * e * (1 - x * 0.7), 0.001)); s.o.position.x = x * dir * -7; s.o.position.z = (1 - eOutExpo(pin)) * -10;
+        s.o.rotation.y = (1 - eOutCubic(seg(t, s.t0 - 0.1, s.t0 + 0.9))) * 7 * dir + (t - s.t0) * 0.9;
+        s.o.rotation.z = Math.sin((t - s.t0) * 2) * 0.05 + (s.i === 1 ? 0.3 : 0);
+        lettersIn(s.nm, t, s.t0 - 0.02, { fromZ: 8, stagger: 0.02, dur: 0.28 }); lettersIn(s.sb, t, s.t0 + 0.14, { fromZ: 0, fromY: -0.3, rot: 0, stagger: 0.015 }); lettersIn(s.num, t, s.t0, { fromZ: 0, rot: 0, stagger: 0 });
+        for (const tx of [s.nm, s.sb, s.num]) { tx.position.x = x * dir * 7; }
+      }
+    };
+  });
+  // ===== S6 close =====
+  addScene(T.s6, DUR + 1, 'z', null, g => {
+    const crown = mkCrown(); crown.scale.setScalar(0.62); crown.position.y = 2.45; crown.rotation.x = 0.25;
+    const l1 = mkText('EL LEGADO', 'cinzel9', 0.62, 0.16, M.plat); l1.position.y = 0.75;
+    const l2 = mkText('se diseña con', 'play7i', 0.5, 0.06, M.plat); l2.position.y = -0.1;
+    const l3 = mkText('AUTORIDAD', 'cinzel9', 0.64, 0.24, M.gold, 0.02); l3.position.y = -1.15;
+    const ln = hline(3.6, -1.55);
+    const brand = mkText('NEUROMARCK', 'cinzel7', 0.17, 0.02, M.plat, 0.16, false); brand.position.y = -2.1;
+    const shock = new THREE.Mesh(new THREE.TorusGeometry(1, 0.03, 8, 120), glowMat(0xffe0a0, 1)); shock.position.y = -0.9;
+    g.add(crown, l1, l2, l3, ln, brand, shock);
+    return t => {
+      const a = T.s6;
+      crown.rotation.y = t * 1.1; crown.scale.setScalar(0.62 * Math.max(eOutBack(seg(t, a + 0.05, a + 0.6)), 0.001));
+      lettersIn(l1, t, a + 0.2, { fromZ: 8, stagger: 0.025 }); lettersIn(l2, t, a + 0.75, { fromZ: 3, stagger: 0.015 });
+      lettersIn(l3, t, 24.86, { fromZ: 12, stagger: 0.022, dur: 0.28, rot: 0.5 });
+      const sp = seg(t, 24.9, 25.8); shock.visible = sp > 0 && sp < 1; shock.scale.setScalar(0.5 + eOutCubic(sp) * 7); shock.material.opacity = 1 - sp;
+      ln.scale.x = Math.max(eOutExpo(seg(t, 25.05, 25.6)), 0.001);
+      lettersIn(brand, t, 25.2, { fromZ: 0, fromY: -0.25, rot: 0, stagger: 0.02 });
+      setTracking(l3, eOutCubic(seg(t, 25.0, 26.4)) * 0.03);
+    };
+  });
+}
+
+const tints = [[0, 0x0a1250], [T.s2, 0x101a6a], [T.s3, 0x0a1250], [T.s4, 0x0c0f3c], [T.s5, 0x12164f], [T.s6, 0x1a1040]];
+const D = 13;
+function dirVec(d, s) { return d === 'x' ? [s * D, 0, 0] : d === 'y' ? [0, s * D, 0] : [0, 0, s]; }
+function renderAt(t) {
+  updDust(t); bg.material.uniforms.uT.value = t;
+  let tint = tints[0][1]; for (const x of tints) if (t >= x[0]) tint = x[1]; bg.material.uniforms.uTint.value.set(tint);
+  rings.rotation.z = t * 0.12; rings.children.forEach((r, i) => { r.rotation.x = Math.sin(t * 0.3 + i) * 0.5; r.rotation.y = Math.cos(t * 0.25 + i * 2) * 0.5; });
+  let blurX = 0, blurY = 0, ab = 0.002;
+  for (const s of scenes) {
+    const vis = t >= s.a && t < s.b; s.g.visible = vis; if (!vis) continue;
+    s.g.position.set(0, 0, 0); s.g.scale.setScalar(1);
+    s.update(t);
+    if (s.inDir) { const p = seg(t, s.a, s.a + 0.42), k = 1 - eOutExpo(p);
+      if (s.inDir === 'z') { s.g.position.z = -k * 45; } else { const v = dirVec(s.inDir, 1); s.g.position.x += v[0] * k; s.g.position.y += v[1] * k; if (s.inDir === 'x') blurX += k * 0.05; else blurY += k * 0.05; }
+      ab += k * 0.03; }
+    if (s.outDir) { const p = seg(t, s.b - 0.26, s.b), k = eInCubic(p);
+      if (s.outDir === 'z') { s.g.position.z = k * 11; ab += k * 0.04; } else { const v = dirVec(s.outDir, -1); s.g.position.x += v[0] * k; s.g.position.y += v[1] * k; if (s.outDir === 'x') blurX += k * 0.05; else blurY += k * 0.05; ab += k * 0.02; } }
+  }
+  // camera: constant push + sway + shake
+  let sh = 0; for (const [ti, amp] of impacts) if (t >= ti) sh += amp * Math.exp(-(t - ti) * 9);
+  let fl = 0; for (const [ti, amp] of flashes) { const d = t - ti; fl += amp * (d >= 0 ? Math.exp(-d * 9) : Math.exp(d * 30)); }
+  let local = 0; for (const s of scenes) if (t >= s.a && t < s.b) local = (t - s.a) / (s.b - s.a);
+  camera.position.set(Math.sin(t * 0.7) * 0.35 + Math.sin(t * 97) * 0.07 * sh, Math.cos(t * 0.5) * 0.2 + Math.cos(t * 83) * 0.07 * sh, 12.6 - local * 1.3 - sh * 0.35);
+  camera.lookAt(0, 0, 0); camera.rotation.z = Math.sin(t * 0.4) * 0.012 + Math.sin(t * 61) * 0.006 * sh;
+  camera.fov = 40 + sh * 1.5; camera.updateProjectionMatrix();
+  rim.position.set(Math.sin(t * 0.9) * 6, 2 + Math.cos(t * 0.7) * 3, 5); rim2.position.set(Math.cos(t * 0.8) * 6, -2 + Math.sin(t * 0.6) * 3, 5);
+  key.position.set(3 + Math.sin(t * 1.3) * 4, 6, 8);
+  const u = fx.uniforms; u.uFlash.value = Math.min(fl, 1.3) * 0.4; u.uAb.value = ab + sh * 0.006; u.uT.value = t; u.uBlur.value.set(blurX, blurY);
+  u.uFade.value = seg(t, 0, 0.3) * (1 - seg(t, DUR - 0.35, DUR));
+  bloom.strength = 0.26 + sh * 0.18;
+  composer.render();
+}
+window.grab = (t) => { renderAt(t); return renderer.domElement.toDataURL('image/jpeg', 0.94); };
+window.renderAt = renderAt;
+
+const F = './node_modules/@fontsource/';
+await Promise.all([
+  loadFont('cinzel9', F + 'cinzel/files/cinzel-latin-900-normal.woff'),
+  loadFont('cinzel7', F + 'cinzel/files/cinzel-latin-700-normal.woff'),
+  loadFont('play7', F + 'playfair-display/files/playfair-display-latin-700-normal.woff'),
+  loadFont('play7i', F + 'playfair-display/files/playfair-display-latin-700-italic.woff'),
+]);
+build();
+renderAt(+(q.get('t') || 0));
+window.READY = true;
+</script></body></html>
